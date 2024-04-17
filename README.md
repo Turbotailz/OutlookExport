@@ -1,47 +1,58 @@
-# OutlookExport
-This Python script uses `pywin32` to export emails and attachments from Outlook into organized directories on your computer. It saves emails by received time and includes subject, body, and attachments, ideal for email backup and archiving.
+This script facilitates the automated export of emails and attachments from Microsoft Outlook into a structured directory system on your Windows computer, leveraging the `pywin32` library.
 
-This Python script is designed to automatically export emails and their attachments from Microsoft Outlook into a structured directory system on your local file system. It utilizes the `pywin32` library to interface with Outlook, making it possible to automate interactions with the email client. Here's a detailed breakdown of its functionalities and structure:
+### Script Description
+This Python script automates the process of exporting emails and attachments from Microsoft Outlook into organized directories on your Windows system. It utilizes the `pywin32` library to interact with Outlook, managing emails efficiently by sorting, saving, and organizing them into directories named after their received timestamps. Non-mail items are handled appropriately, and errors are robustly managed.
 
-### Script Components and Workflow:
-
-1. **Importing Required Modules**:
-   - `datetime`: For handling date and time objects.
-   - `pathlib.Path`: For filesystem paths operations, creating and managing directory paths.
-   - `re`: Regular expression module for cleaning file names.
-   - `win32com.client`: To interact with COM objects, in this case, Microsoft Outlook.
+### Key Features and Workflow:
+1. **Modules Used**:
+   - `datetime` for handling date and time.
+   - `pathlib` for file system path operations.
+   - `re` for sanitizing filenames using regular expressions.
+   - `win32com.client` for interacting with COM objects, specifically Microsoft Outlook.
 
 2. **Utility Functions**:
-   - `create_directory(base_path, folder_name)`: Creates a directory at the specified path and handles errors related to directory creation.
-   - `save_attachments(attachments, folder_path)`: Iterates through email attachments and saves them to a specified directory, sanitizing the filenames to remove invalid characters.
+   - `create_directory(base_path, folder_name)`: Manages directory creation.
+   - `save_attachments(attachments, folder_path)`: Saves email attachments to specified directories after cleaning filenames.
 
-3. **Main Functionality - `export_emails(folder, output_dir)`**:
-   - Accesses the items in a specified Outlook folder.
-   - Sorts these items by "ReceivedTime" if they are email items, avoiding errors for other item types like calendar entries.
-   - Processes each item: If it's an email, it creates a directory named after the email's received time, saves the email's body and subject to a text file, and saves any attachments.
-   - Skips non-email items and logs any errors or skipped items.
+3. **Email Processing**:
+   - Accesses items in specified Outlook folders, sorting emails by "ReceivedTime".
+   - Processes each email, creating directories named by email timestamp, saving subject and body to text files, and saving attachments.
 
-4. **Main Execution Function - `main()`**:
-   - Starts by initializing the Outlook application interface and accessing the default namespace.
-   - Sets up the base directory for email exports (`EmailExports` within the current working directory).
-   - Iterates through each store (email account) and its folders within the Outlook application, processing each folder by exporting its contents using the `export_emails()` function.
-   - Collects and prints a summary of all processed emails and any errors or skipped operations.
+4. **Execution and Error Handling**:
+   - Script initializes Outlook application access, processes all folders within each email account, and logs any errors or skips.
 
-5. **Error Handling**:
-   - Comprehensive throughout the script to handle and log exceptions that may occur when accessing Outlook properties, file IO operations, or COM interactions.
+5. **Output**:
+   - Organizes emails in directories based on timestamps, includes both text files for email content and original formats for attachments.
 
-6. **Output**:
-   - Emails are organized in directories named after their received timestamp within folders corresponding to their original Outlook folders.
-   - Each email's content is saved in a text file named `email_body.txt`, and attachments are saved in their original formats within the same directory.
+### System Requirements and Installation Guide:
+- **Operating System Requirement**: Designed specifically for Windows OS due to the dependence on `pywin32` and Outlook.
 
-### Use Case:
-This script is particularly useful for backing up emails from Outlook into a local, searchable file system format. It's also beneficial for processing large quantities of emails for data extraction, archiving, or migration purposes.
+- **Python Installation**:
+  1. **Download Python**:
+     - Go to the [Python Releases for Windows](https://www.python.org/downloads/windows/) page on Python's official website.
+     - Click on "Download Windows installer".
+  2. **Install Python**:
+     - Run the downloaded installer.
+     - Make sure to check "Add Python 3.x to PATH" at the bottom of the installation window to automatically add Python to your environment variables.
+     - Click "Install Now".
 
-### Running the Script:
-To run this script, you need:
-- Python installed on your system.
-- The `pywin32` module installed.
-- Microsoft Outlook installed and configured with at least one email account.
-- Appropriate permissions to interact with Outlook and the filesystem.
+- **Adding Python and pip to PATH Manually**:
+  If you didn’t add Python to your PATH during the installation, you can add it manually:
+  1. **Open the Start Search**, type `env`, and select "Edit the system environment variables" or "Edit environment variables for your account".
+  2. **Under System Properties**, click on the "Environment Variables…" button.
+  3. **Find the 'Path' variable** in the "System variables" section and click "Edit…".
+  4. **Add Python path**:
+     - Click "New" and add the path to the folder where Python is installed, e.g., `C:\Users\<Username>\AppData\Local\Programs\Python\Python39`.
+     - Add another new line for the `Scripts` directory, e.g., `C:\Users\<Username>\AppData\Local\Programs\Python\Python39\Scripts`.
+  5. **Click OK** on all dialogs to close them.
 
-This script is an example of how automation can be used to simplify routine data management tasks, providing a robust solution for exporting and archiving email data from Outlook.
+- **Install `pywin32`**:
+  ```bash
+  pip install pywin32
+  ```
+
+- **Running the Script**:
+  - Ensure Microsoft Outlook is installed and configured with your email account.
+  - Run the script with administrative privileges to enable necessary permissions for accessing Outlook and performing file operations.
+
+This setup ensures that the script can be run efficiently on any compatible Windows machine, providing a robust tool for exporting and archiving email data from Microsoft Outlook.
