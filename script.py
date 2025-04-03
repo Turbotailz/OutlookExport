@@ -1,135 +1,341 @@
 import datetime
-from pathlib import Path
 import re
-import win32com.client
-from win32com.client import gencache
-
-def create_directory(base_path, folder_name):
-    """ Helper function to create a directory for storing email exports.
-    
-    Args:
-        base_path (Path): The base directory where the folder will be created.
-        folder_name (str): The name of the folder to be created.
-    
-    Returns:
-        Path: The path to the newly created directory or None if an error occurred.
-    """
+import sys
+from pathlib import Path
+import win32com.client # type: ignore
+# Ensure constants are available
+try:
+    constants = win32com.client.constants
+except AttributeError:
     try:
-        # Create the directory and any required parent directories
-        new_dir = (base_path / folder_name)
-        new_dir.mkdir(parents=True, exist_ok=True)
-        return new_dir
+        win32com.client.gencache.EnsureModule('{00062FFF-0000-0000-C000-000000000046}', 0, 9, 6)
+        constants = win32com.client.constants
+        print("Note: Had to regenerate win32com constants cache.")
+    except Exception as e_cache:
+        print(f"FATAL: Failed to load win32com constants. Error: {e_cache}")
+        sys.exit(1)
+
+def sanitize_filename(filename):
+    """Removes invalid characters for Windows filenames and limits length."""
+    # Remove characters invalid in Windows filenames
+    sanitized = re.sub(r'[<>:"/\\|?*]+', '_', filename)
+    # Remove control characters
+    sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
+    # Replace leading/trailing spaces or dots
+    sanitized = sanitized.strip('. ')
+    # Limit length to avoid issues (e.g., 150 chars)
+    max_len = 150
+    if len(sanitized) > max_len:
+        name_part, dot, extension = sanitized.rpartition('.')
+        if dot:
+            name_part = name_part[:max_len - len(extension) - 1]
+            sanitized = f"{name_part}.{extension}"
+        else:
+            sanitized = sanitized[:max_len]
+    if not sanitized:
+        return "Invalid_Name"
+    return sanitized
+
+def create_directory(path_obj):
+    """Creates a directory if it doesn't exist. Returns Path object or None."""
+    try:
+        path_obj.mkdir(parents=True, exist_ok=True)
+        return path_obj
+    except OSError as e:
+        print(f"Error creating directory {path_obj}: {str(e)}")
+        return None
     except Exception as e:
-        # Print error message if the directory creation fails
-        print(f"Error creating directory {folder_name}: {str(e)}")
+        print(f"Unexpected error creating directory {path_obj}: {str(e)}")
         return None
 
-def save_attachments(attachments, folder_path):
-    """ Saves all email attachments to a specified directory.
-    
-    Args:
-        attachments (Attachments): A collection of attachments from an email.
-        folder_path (Path): The directory path where attachments should be saved.
-    """
-    for attachment in attachments:
-        try:
-            # Sanitize the filename to remove any invalid characters
-            attachment_name = re.sub(r'[^\w\s.]+', '', attachment.FileName)
-            # Save the attachment to the specified folder
-            attachment.SaveAsFile(str(folder_path / attachment_name))
-        except Exception as e:
-            # Print error message if saving the attachment fails
-            print(f"Failed to save attachment {attachment.FileName}: {str(e)}")
+def list_folders_recursive(folder, prefix="", all_folders_list=None):
+    """Recursively lists folders and appends (display_name, folder_object) to a list."""
+    if all_folders_list is None:
+        all_folders_list = []
 
-def export_emails(folder, output_dir):
-    """ Processes and exports emails from a given Outlook folder.
-    
-    Args:
-        folder (Folder): The Outlook folder from which to export emails.
-        output_dir (Path): The directory path where emails should be exported.
-    
-    Returns:
-        tuple: A tuple containing the number of processed emails and a list of error messages.
-    """
-    messages = folder.Items
-    # Attempt to sort the messages by ReceivedTime, if applicable
-    if folder.DefaultItemType == win32com.client.constants.olMailItem:
-        try:
-            messages.Sort("[ReceivedTime]", True)
-        except Exception as e:
-            print(f"Could not sort items in folder {folder.Name}: {str(e)}")
+    current_display_name = f"{prefix}{folder.Name}" if prefix else folder.Name
+    all_folders_list.append((current_display_name, folder))
 
+    try:
+        subfolders = folder.Folders
+        if subfolders.Count > 0:
+            new_prefix = f"{current_display_name}/"
+            for sub_folder in subfolders:
+                list_folders_recursive(sub_folder, new_prefix, all_folders_list)
+    except Exception as e:
+        print(f"Warning: Could not access subfolders of '{folder.Name}'. Error: {e}")
+
+    return all_folders_list
+
+
+def export_emails_as_msg(folder, output_dir_base):
+    """
+    Exports emails from a given Outlook folder as .msg files,
+    skipping if a file with the same name already exists.
+    Returns: (processed_count, errors_list, skipped_non_mail, skipped_duplicates)
+    """
     processed_count = 0
-    errors_and_skips = []
+    errors = []
+    skipped_non_mail = 0
+    skipped_duplicates = 0 # <-- New counter
 
-    for message in messages:
-        email_time = "Unknown"
+    # Determine output directory based on folder path
+    try:
+        full_folder_path = folder.FolderPath
+        path_parts = full_folder_path.split('\\')
+        if len(path_parts) > 3:
+             relative_folder_path = Path(*path_parts[3:])
+             output_dir = create_directory(output_dir_base / relative_folder_path)
+        else:
+            # Sanitize top-level folder name just in case
+            safe_folder_name = sanitize_filename(folder.Name)
+            output_dir = create_directory(output_dir_base / safe_folder_name)
+
+        if not output_dir:
+             errors.append(f"Failed to create output directory for folder '{folder.Name}'. Skipping folder.")
+             # Return 4 values now
+             return 0, errors, 0, 0
+
+    except Exception as e:
+        errors.append(f"Error determining output path for folder '{folder.Name}': {e}. Skipping folder.")
+        # Return 4 values now
+        return 0, errors, 0, 0
+
+    print(f"  Exporting to: {output_dir}")
+
+    try:
+        messages = folder.Items
+    except Exception as e:
+        errors.append(f"Could not retrieve items from folder '{folder.Name}': {e}")
+         # Return 4 values now
+        return 0, errors, 0, 0
+
+    total_items = len(messages) # Get total count for progress
+    print(f"    Found {total_items} items in '{folder.Name}'.")
+
+    for i, message in enumerate(messages):
+        # Progress indicator
+        if (i + 1) % 100 == 0: # Changed to 100 for less frequent updates
+             print(f"    Processed {i+1}/{total_items} items...")
+
+        # Check if it's a mail item
         try:
-            if not hasattr(message, 'ReceivedTime'):
-                errors_and_skips.append("Skipped non-mail item with unknown received time.")
+            if not hasattr(message, 'Class') or message.Class != constants.olMail:
+                skipped_non_mail += 1
                 continue
-            if message.Class != win32com.client.constants.olMail:
-                errors_and_skips.append(f"Skipped non-mail item at {message.ReceivedTime.strftime('%Y-%m-%d %H:%M:%S')}")
-                continue
-
-            # Format the time stamp for folder naming
-            email_time = message.ReceivedTime.strftime("%Y-%m-%d_%H-%M-%S")
-            folder_name = f"{email_time}"
-            email_folder = create_directory(output_dir, folder_name)
-
-            if email_folder:
-                # Extract subject and body, handling missing attributes
-                subject = getattr(message, 'Subject', 'No Subject')
-                body = getattr(message, 'Body', 'No content available')
-                email_content = f"Subject: {subject}\n\n{body}"
-                # Write the email content to a text file in the created directory
-                with open(email_folder / "email_body.txt", 'w', encoding='utf-8') as file:
-                    file.write(email_content)
-                # Save attachments if present
-                if message.Attachments.Count > 0:
-                    save_attachments(message.Attachments, email_folder)
-            processed_count += 1
         except Exception as e:
-            errors_and_skips.append(f"Error with item at {email_time}: {str(e)}")
+             errors.append(f"Error checking item type at index {i}: {e}. Skipping item.")
+             skipped_non_mail += 1
+             continue
 
-    print(f"Successfully processed {processed_count} emails in folder {folder.Name}.")
-    return processed_count, errors_and_skips
+        try:
+            # Get timestamp for filename
+            received_time_obj = getattr(message, 'ReceivedTime', None)
+            if received_time_obj:
+                 time_str = received_time_obj.strftime("%Y-%m-%d_%H-%M-%S")
+            else:
+                time_str = "UnknownTime"
 
+            # Get subject for filename
+            subject = getattr(message, 'Subject', 'No Subject')
+            safe_subject = sanitize_filename(subject)
+
+            # Construct filename and full path object
+            filename = f"{time_str}_{safe_subject}.msg"
+            full_path_obj = output_dir / filename
+
+            # --- Check for Duplicates ---
+            if full_path_obj.exists():
+                skipped_duplicates += 1
+                continue # Skip to the next message
+            # --- End Check ---
+
+            # Save as .msg file (convert path object to string for SaveAs)
+            message.SaveAs(str(full_path_obj), constants.olMSG)
+            processed_count += 1
+
+        except Exception as e:
+            error_subject = getattr(message, 'Subject', 'Unknown Subject')
+            error_time = time_str
+            errors.append(f"Error saving item '{error_subject}' (Time: {error_time}): {str(e)}")
+
+    print(f"  Finished folder '{folder.Name}'. Exported: {processed_count}, Skipped Duplicates: {skipped_duplicates}, Errors: {len(errors)}, Skipped non-mail: {skipped_non_mail}")
+    # Return 4 values now
+    return processed_count, errors, skipped_non_mail, skipped_duplicates
+
+# --- Main Execution ---
 def main():
-    """ Main function to initialize Outlook access and process each folder. """
-    print("Starting the script...")
-    # Initialize Outlook Application
-    outlook = win32com.client.gencache.EnsureDispatch("Outlook.Application")
-    namespace = outlook.GetNamespace("MAPI")
-    base_dir = Path.cwd() / "EmailExports"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    all_folders = namespace.Folders
+    print("Starting Outlook Email Exporter...")
 
+    # 1. Get Output Path (Code is the same as before)
+    while True:
+        output_path_str = input("Enter the full path for email exports (e.g., E:\\EmailBackups): ")
+        if not output_path_str:
+            print("Path cannot be empty. Please try again.")
+            continue
+        try:
+            base_dir = Path(output_path_str)
+            if not create_directory(base_dir):
+                 raise OSError(f"Failed to create or access base directory: {base_dir}")
+            print(f"Using base export directory: {base_dir}")
+            break
+        except OSError as e:
+            print(f"Error: {e}")
+            print("Please check the path, ensure the drive/folder exists, and you have write permissions.")
+        except Exception as e:
+            print(f"An unexpected error occurred with the path: {e}")
+        retry = input("Try entering the path again? (y/n): ").lower()
+        if retry != 'y':
+            print("Exiting script.")
+            return
+
+    # 2. Connect to Outlook (Code is the same as before)
+    try:
+        print("Connecting to Outlook...")
+        outlook = win32com.client.gencache.EnsureDispatch("Outlook.Application")
+        namespace = outlook.GetNamespace("MAPI")
+        print("Connected to Outlook.")
+    except Exception as e:
+        print(f"FATAL: Failed to connect to Outlook: {e}")
+        return
+
+    # 3. Select Store (Code is the same as before)
+    stores = namespace.Folders
+    print("\nAvailable Mailboxes/Stores:")
+    if not stores or stores.Count == 0:
+         print("FATAL: No mailboxes/stores found.")
+         return
+    for i, store in enumerate(stores):
+        print(f"  {i + 1}: {store.Name}")
+    selected_store = None
+    while selected_store is None:
+        try:
+            choice = input(f"Select the number of the mailbox to export from (1-{stores.Count}): ")
+            store_index = int(choice) - 1
+            if 0 <= store_index < stores.Count:
+                selected_store = stores[store_index]
+                print(f"Selected mailbox: {selected_store.Name}")
+            else:
+                print("Invalid number selected.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+        except Exception as e:
+             print(f"An error occurred selecting the store: {e}")
+
+    safe_store_name = sanitize_filename(selected_store.Name)
+    store_output_base = create_directory(base_dir / safe_store_name)
+    if not store_output_base:
+         print(f"FATAL: Could not create directory for store {safe_store_name}. Exiting.")
+         return
+
+    # 4. List and Select Folders (Code is the same as before)
+    print(f"\nListing folders in '{selected_store.Name}' (this may take a moment)...")
+    all_folders = []
+    try:
+        for top_level_folder in selected_store.Folders:
+             list_folders_recursive(top_level_folder, prefix="", all_folders_list=all_folders)
+    except Exception as e:
+        print(f"Error listing folders: {e}")
+        return
+    if not all_folders:
+        print("No folders found in the selected mailbox.")
+        return
+    print("\nAvailable Folders:")
+    for i, (display_name, _) in enumerate(all_folders):
+        print(f"  {i + 1}: {display_name}")
+    selected_folders_to_export = []
+    while True:
+        try:
+            choices_str = input("Enter the numbers of the folders to export, separated by commas (e.g., 1, 3, 15), or 'all': ").strip()
+            if choices_str.lower() == 'all':
+                selected_folders_to_export = [f_obj for _, f_obj in all_folders]
+                print("Selected all folders.")
+                break
+            elif not choices_str:
+                 print("No folders selected. Exiting.")
+                 return
+            indices = [int(x.strip()) - 1 for x in choices_str.split(',')]
+            valid_indices = True
+            temp_selected_folders = []
+            selected_names = []
+            for index in indices:
+                if 0 <= index < len(all_folders):
+                    display_name, folder_obj = all_folders[index]
+                    temp_selected_folders.append(folder_obj)
+                    selected_names.append(display_name)
+                else:
+                    print(f"Invalid folder number: {index + 1}")
+                    valid_indices = False
+                    break
+            if valid_indices:
+                 selected_folders_to_export = temp_selected_folders
+                 print("\nSelected folders:")
+                 for name in selected_names:
+                      print(f"- {name}")
+                 confirm = input("Confirm selection? (y/n): ").lower()
+                 if confirm == 'y':
+                      break
+                 else:
+                      print("Selection cancelled. Please re-enter folder numbers.")
+                      selected_folders_to_export = []
+            else:
+                 selected_folders_to_export = []
+        except ValueError:
+            print("Invalid input. Please enter numbers separated by commas, or 'all'.")
+        except Exception as e:
+            print(f"An error occurred processing selection: {e}")
+
+    # 5. Process Selected Folders
+    print("\n--- Starting Export ---")
     total_processed = 0
-    all_errors_and_skips = []
+    total_errors = []
+    total_skipped_non_mail = 0
+    total_skipped_duplicates = 0 # <-- New counter
 
-    # Process each store and its folders
-    for store in all_folders:
-        print(f"Processing store: {store.Name}")
-        store_dir = create_directory(base_dir, store.Name)
-        folders = store.Folders
-        for folder in folders:
-            print(f"Processing folder: {folder.Name}")
-            folder_dir = create_directory(store_dir, folder.Name)
-            processed_count, errors_and_skips = export_emails(folder, folder_dir)
-            total_processed += processed_count
-            all_errors_and_skips.extend(errors_and_skips)
+    for folder_obj in selected_folders_to_export:
+        # Use display name for clarity if available, otherwise folder name
+        folder_display_name = folder_obj.Name # Fallback
+        for d_name, f_obj in all_folders:
+             if f_obj == folder_obj:
+                  folder_display_name = d_name
+                  break
+        print(f"\nProcessing folder: {folder_display_name}")
 
-    # Print summary of all errors and skips
-    if all_errors_and_skips:
-        print("Summary of errors and skipped emails:")
-        for error in all_errors_and_skips:
-            print(error)
+        # Update to receive 4 values
+        processed, errors, skipped_non_mail, skipped_duplicates = export_emails_as_msg(folder_obj, store_output_base)
+        total_processed += processed
+        total_errors.extend(errors)
+        total_skipped_non_mail += skipped_non_mail
+        total_skipped_duplicates += skipped_duplicates # <-- Accumulate count
+
+    # 6. Print Summary (Updated)
+    print("\n--- Export Complete ---")
+    print(f"Total emails exported as .msg: {total_processed}")
+    print(f"Total duplicates skipped (file already exists): {total_skipped_duplicates}") # <-- New summary line
+    print(f"Total non-mail items skipped: {total_skipped_non_mail}")
+    if total_errors:
+        print(f"\nEncountered {len(total_errors)} errors during export:")
+        max_errors_to_show = 20
+        for i, error in enumerate(total_errors):
+            if i >= max_errors_to_show:
+                print(f"... (and {len(total_errors) - max_errors_to_show} more errors)")
+                break
+            print(f"- {error}")
     else:
-        print("No errors or skipped emails.")
+        print("No errors encountered during export.")
 
-    print(f"Total emails processed: {total_processed}")
-    print("Email export completed.")
+    print(f"\nExport location: {store_output_base}")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+    except Exception as e:
+        print("\n--- An Unexpected Error Occurred ---")
+        import traceback
+        print(traceback.format_exc())
+        print(f"Error: {e}")
+    finally:
+        print("\nScript finished.")
